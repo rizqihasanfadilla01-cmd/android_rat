@@ -64,10 +64,19 @@ fix_apk_compat() {
 
     if ! command -v apktool &>/dev/null; then
         info "Installing apktool..."
-        sudo apt install -y apktool default-jdk 2>/dev/null
+        sudo apt update -qq
+        sudo apt install -y apktool default-jdk 2>&1
+        if ! command -v apktool &>/dev/null; then
+            warn "apt install failed, trying direct download..."
+            sudo apt install -y openjdk-17-jdk-headless 2>&1 || true
+            local apk_ver="2.9.3"
+            sudo wget -q "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_${apk_ver}.jar" -O /usr/local/bin/apktool.jar
+            sudo wget -q "https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool" -O /usr/local/bin/apktool
+            sudo chmod +x /usr/local/bin/apktool
+        fi
     fi
     if ! command -v keytool &>/dev/null; then
-        sudo apt install -y default-jdk 2>/dev/null
+        sudo apt install -y openjdk-17-jdk-headless 2>&1
     fi
 
     apktool d "$apk" -o "$outdir" -f || { err "apktool decompile failed"; return 1; }
