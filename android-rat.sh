@@ -60,7 +60,7 @@ fix_apk_compat() {
     local apk="$1"
     local outdir="/tmp/apk_fix_$(date +%s)"
 
-    info "Fixing APK compatibility (api level 15 -> 21)..."
+    info "Fixing APK compatibility (minSdk=21, targetSdk=34, exported)..."
 
     if ! command -v apktool &>/dev/null; then
         info "Installing apktool..."
@@ -82,8 +82,18 @@ fix_apk_compat() {
     apktool d "$apk" -o "$outdir" -f || { err "apktool decompile failed"; return 1; }
 
     sed -i 's|android:minSdkVersion="[0-9]*"|android:minSdkVersion="21"|g' "$outdir/AndroidManifest.xml"
-    if ! grep -q 'android:targetSdkVersion' "$outdir/AndroidManifest.xml"; then
-        sed -i 's|<uses-sdk|<uses-sdk android:targetSdkVersion="33"|' "$outdir/AndroidManifest.xml"
+    if grep -q 'android:targetSdkVersion' "$outdir/AndroidManifest.xml"; then
+        sed -i 's|android:targetSdkVersion="[0-9]*"|android:targetSdkVersion="34"|g' "$outdir/AndroidManifest.xml"
+    else
+        sed -i 's|<uses-sdk|<uses-sdk android:targetSdkVersion="34"|' "$outdir/AndroidManifest.xml"
+    fi
+
+    for tag in activity receiver service provider; do
+        sed -i "/<$tag /{/android:exported/!s|<$tag |<$tag android:exported=\"true\" |}" "$outdir/AndroidManifest.xml"
+    done
+
+    if ! grep -q 'android:extractNativeLibs' "$outdir/AndroidManifest.xml"; then
+        sed -i 's|<application |<application android:extractNativeLibs="true" |' "$outdir/AndroidManifest.xml"
     fi
 
     apktool b "$outdir" -o /tmp/payload_unsigned.apk || { err "apktool rebuild failed"; return 1; }
