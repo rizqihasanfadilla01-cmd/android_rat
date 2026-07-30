@@ -158,21 +158,84 @@ fix_apk_compat() {
 
     apktool b "$outdir" -o /tmp/payload_unsigned.apk || { err "apktool rebuild failed"; return 1; }
 
-    if ! keytool -genkey -v -keystore /tmp/debug.keystore -alias android \
+    keytool -genkey -v -keystore /tmp/debug.keystore -alias android \
         -keyalg RSA -keysize 2048 -validity 10000 \
         -dname "CN=Android,OU=Debug,O=Android,C=US" \
-        -storepass android -keypass android -noprompt 2>&1; then
-        err "keytool failed"; return 1
+        -storepass android -keypass android -noprompt 2>&1 || true
+
+    if ! command -v zipalign &>/dev/null; then
+        sudo apt install -y android-sdk-build-tools 2>&1 || true
     fi
 
-    if ! jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
-        -keystore /tmp/debug.keystore -storepass android -keypass android \
-        /tmp/payload_unsigned.apk android 2>&1; then
-        err "jarsigner failed"; return 1
+    local signer=""
+    if command -v apksigner &>/dev/null; then
+        signer="apksigner"
+    elif ! command -v uber-apk-signer &>/dev/null && [ ! -f /usr/local/bin/uber-apk-signer.jar ]; then
+        info "Downloading uber-apk-signer..."
+        sudo wget -qO /usr/local/bin/uber-apk-signer.jar \
+            "https://github.com/patrickfav/uber-apk-signer/releases/download/1.3.0/uber-apk-signer-1.3.0.jar" 2>&1 || true
+        if [ -f /usr/local/bin/uber-apk-signer.jar ]; then
+            signer="uber-apk-signer"
+        fi
+    else
+        signer="uber-apk-signer"
+    fi
+
+    local target_apk="/tmp/payload_unsigned.apk"
+    if command -v zipalign &>/dev/null; then
+        local aligned="/tmp/payload_aligned.apk"
+        zipalign -f 4 "$target_apk" "$aligned" 2>&1 || { cp "$target_apk" "$aligned"; }
+        target_apk="$aligned"
+    fi
+
+    case "$signer" in
+        apksigner)
+            info "Signing with apksigner (v1+v2+v3)..."
+            apksigner sign \
+                --ks /tmp/debug.keystore --ks-key-alias android \
+                --ks-pass pass:android --key-pass pass:android \
+                --v1-signing-enabled true --v2-signing-enabled true \
+                --v3-signing-enabled true "$target_apk" 2>&1 || {
+                err "apksigner failed, falling back to jarsigner"
+                jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
+                    -keystore /tmp/debug.keystore -storepass android -keypass android \
+                    /tmp/payload_unsigned.apk android 2>&1 || {
+                    err "jarsigner failed"; return 1
+                }
+            }
+            ;;
+        uber-apk-signer)
+            info "Signing with uber-apk-signer (v1+v2+v3)..."
+            java -jar /usr/local/bin/uber-apk-signer.jar \
+                --apks "$target_apk" \
+                --ks /tmp/debug.keystore \
+                --ksAlias android \
+                --ksPass android \
+                --overwrite 2>&1 || {
+                err "uber-apk-signer failed, falling back to jarsigner"
+                jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
+                    -keystore /tmp/debug.keystore -storepass android -keypass android \
+                    /tmp/payload_unsigned.apk android 2>&1 || {
+                    err "jarsigner failed"; return 1
+                }
+            }
+            ;;
+        *)
+            warn "No v2/v3 signer found, using jarsigner (v1 only)"
+            jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
+                -keystore /tmp/debug.keystore -storepass android -keypass android \
+                /tmp/payload_unsigned.apk android 2>&1 || {
+                err "jarsigner failed"; return 1
+            }
+            ;;
+    esac
+
+    if [ "$target_apk" != "/tmp/payload_unsigned.apk" ]; then
+        cp "$target_apk" /tmp/payload_unsigned.apk
     fi
 
     cp /tmp/payload_unsigned.apk "$apk"
-    rm -rf "$outdir" /tmp/payload_unsigned.apk /tmp/debug.keystore
+    rm -rf "$outdir" /tmp/payload_unsigned.apk /tmp/payload_aligned.apk /tmp/debug.keystore
     info "APK compatibility fixed"
     return 0
 }
