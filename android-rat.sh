@@ -9,10 +9,10 @@ WSL_DISTRO="kali-linux"
 # Colors
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'; W='\033[0m'
 
-info()  { echo -e "${C}[*]${W} $*"; }
-ok()    { echo -e "${G}[+]${W} $*"; }
-warn()  { echo -e "${Y}[!]${W} $*"; }
-err()   { echo -e "${R}[x]${W} $*"; }
+info()  { echo -e "${C}[*]${W} $*" >&2; }
+ok()    { echo -e "${G}[+]${W} $*" >&2; }
+warn()  { echo -e "${Y}[!]${W} $*" >&2; }
+err()   { echo -e "${R}[x]${W} $*" >&2; }
 
 banner() {
     clear
@@ -70,23 +70,27 @@ fix_apk_compat() {
         sudo apt install -y default-jdk 2>/dev/null
     fi
 
-    apktool d "$apk" -o "$outdir" -f 2>/dev/null || return 1
+    apktool d "$apk" -o "$outdir" -f || { err "apktool decompile failed"; return 1; }
 
     sed -i 's|android:minSdkVersion="[0-9]*"|android:minSdkVersion="21"|g' "$outdir/AndroidManifest.xml"
-    if ! grep -q 'android:targetSdkVersion' "$outdir/AndroidManifest.xml" 2>/dev/null; then
+    if ! grep -q 'android:targetSdkVersion' "$outdir/AndroidManifest.xml"; then
         sed -i 's|<uses-sdk|<uses-sdk android:targetSdkVersion="33"|' "$outdir/AndroidManifest.xml"
     fi
 
-    apktool b "$outdir" -o /tmp/payload_unsigned.apk 2>/dev/null || return 1
+    apktool b "$outdir" -o /tmp/payload_unsigned.apk || { err "apktool rebuild failed"; return 1; }
 
-    keytool -genkey -v -keystore /tmp/debug.keystore -alias android \
+    if ! keytool -genkey -v -keystore /tmp/debug.keystore -alias android \
         -keyalg RSA -keysize 2048 -validity 10000 \
         -dname "CN=Android,OU=Debug,O=Android,C=US" \
-        -storepass android -keypass android -noprompt 2>/dev/null
+        -storepass android -keypass android -noprompt 2>&1; then
+        err "keytool failed"; return 1
+    fi
 
-    jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
+    if ! jarsigner -sigalg SHA1withRSA -digestalg SHA1 \
         -keystore /tmp/debug.keystore -storepass android -keypass android \
-        /tmp/payload_unsigned.apk android 2>/dev/null
+        /tmp/payload_unsigned.apk android 2>&1; then
+        err "jarsigner failed"; return 1
+    fi
 
     cp /tmp/payload_unsigned.apk "$apk"
     rm -rf "$outdir" /tmp/payload_unsigned.apk /tmp/debug.keystore
